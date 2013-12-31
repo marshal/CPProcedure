@@ -1,3 +1,4 @@
+--[Modified] at 2012-07-13 by 王红燕  Description:Add Financial Dept Configuration Data
 if OBJECT_ID(N'Proc_QueryNewlyIncreasedMerWithBranchOffice',N'P') is not null
 begin
 	drop procedure Proc_QueryNewlyIncreasedMerWithBranchOffice;
@@ -5,9 +6,9 @@ end
 go
 
 Create Procedure Proc_QueryNewlyIncreasedMerWithBranchOffice
-	@StartDate datetime = '2011-03-01',
-	@PeriodUnit nChar(3) = N'自定义',
-	@EndDate datetime = '2011-04-30',
+	@StartDate datetime = '2012-10-22',
+	@PeriodUnit nChar(3) = N'月',
+	@EndDate datetime = '2012-12-30',
 	@BranchOfficeName nChar(15) = N'银联商务有限公司安徽分公司'
 as 
 begin
@@ -60,19 +61,49 @@ where
 	
 
 --4. Get table MerWithBranchOffice
-select
-	SalesDeptConfiguration.MerchantNo,
-	BranchOfficeNameRule.UmsSpecMark
+With SalesBranchOffice as
+(
+	select
+		SalesDeptConfig.MerchantNo,
+		BranchOfficeNameRule.UmsSpecMark UmsSpecMark
+	from
+		Table_SalesDeptConfiguration SalesDeptConfig
+		inner join
+		Table_BranchOfficeNameRule BranchOfficeNameRule
+		on
+			SalesDeptConfig.BranchOffice = BranchOfficeNameRule.UnnormalBranchOfficeName
+			and
+			ISNULL(BranchOfficeNameRule.UmsSpec,N'') <> N''
+	where
+		BranchOfficeNameRule.UmsSpec = @BranchOfficeName
+),
+FinanceBranchOffice as 
+(
+	select
+		Finance.MerchantNo,
+		BranchOfficeNameRule.UmsSpecMark UmsSpecMark
+	from
+		Table_FinancialDeptConfiguration Finance
+		inner join
+		Table_BranchOfficeNameRule BranchOfficeNameRule
+		on
+			Finance.BranchOffice = BranchOfficeNameRule.UnnormalBranchOfficeName
+			and
+			ISNULL(BranchOfficeNameRule.UmsSpec,N'') <> N''
+	where
+		BranchOfficeNameRule.UmsSpec = @BranchOfficeName
+)
+select 
+	coalesce(SalesBranchOffice.MerchantNo, FinanceBranchOffice.MerchantNo) MerchantNo,
+	coalesce(SalesBranchOffice.UmsSpecMark, FinanceBranchOffice.UmsSpecMark) UmsSpecMark
 into
 	#MerWithBranchOffice
 from
-	Table_SalesDeptConfiguration SalesDeptConfiguration
-	inner join
-	Table_BranchOfficeNameRule BranchOfficeNameRule
+	SalesBranchOffice
+	full outer join 
+	FinanceBranchOffice
 	on
-		SalesDeptConfiguration.BranchOffice = BranchOfficeNameRule.UnnormalBranchOfficeName
-where
-	BranchOfficeNameRule.UmsSpec = @BranchOfficeName;
+		SalesBranchOffice.MerchantNo = FinanceBranchOffice.MerchantNo;
 	
 	
 --5. Get Newly Increased Merchant & Special Merchant

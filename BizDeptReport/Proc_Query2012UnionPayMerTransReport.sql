@@ -1,3 +1,5 @@
+--[Modified] at 2012-07-13 by 王红燕  Description:Add Financial Dept Configuration Data
+--[Modified] at 2013-07-08 by 丁俊昊  Description:Add TraScreenSum Data
 if OBJECT_ID(N'Proc_Query2012UnionPayMerTransReport', N'P') is not null
 begin
 	drop procedure Proc_Query2012UnionPayMerTransReport;
@@ -11,6 +13,7 @@ create procedure Proc_Query2012UnionPayMerTransReport
 as
 begin
 
+
 --1. Check input
 if (@StartDate is null or ISNULL(@PeriodUnit, N'') = N''  or (@PeriodUnit = N'自定义' and @EndDate is null))
 begin
@@ -20,6 +23,7 @@ end
 --2. Prepare StartDate and EndDate
 declare @CurrStartDate datetime;
 declare @CurrEndDate datetime;
+
 
 if(@PeriodUnit = N'月')
 begin
@@ -87,8 +91,8 @@ InvalidPayData as
 select
 	coalesce(Data.MerchantNo,Invalid.MerchantNo) MerchantNo,
 	coalesce(Data.GateNo,Invalid.GateNo) GateNo,
-	Convert(decimal,(ISNULL(Data.TransAmt,0)+ISNULL(Invalid.TransAmt,0)))/100 TransAmt,
-	ISNULL(Data.TransCnt,0)+ISNULL(Invalid.TransCnt,0) TransCnt
+	ISNULL(Data.TransCnt,0)+ISNULL(Invalid.TransCnt,0) TransCnt,
+	Convert(decimal,(ISNULL(Data.TransAmt,0)+ISNULL(Invalid.TransAmt,0)))/100 TransAmt
 into
 	#PaymentData
 from
@@ -99,7 +103,7 @@ from
 		Data.MerchantNo = Invalid.MerchantNo
 		and
 		Data.GateNo = Invalid.GateNo;
-		
+
 --3.1.1 Prepare '消费类' Data
 select
 	MerchantNo,
@@ -129,21 +133,47 @@ group by
 	MerchantNo;
 
 --3.1.3 Prepare '代收类' Data
+with Deduction as
+(
 select
 	MerchantNo,
 	SUM(TransCnt) TransCnt,
 	SUM(TransAmt) TransAmt
-into
-	#DeductionData
 from
 	#PaymentData
 where
 	GateNo in (select GateNo from Table_GateCategory where GateCategory1 = N'代扣')
 group by
-	MerchantNo;
+	MerchantNo
+union all
+select
+	MerchantNo,
+	SUM(CalFeeCnt) TransCnt,
+	convert(decimal,SUM(CalFeeAmt))/100 TransAmt
+from
+	Table_TraScreenSum
+where
+	CPDate >= @CurrStartDate
+	and
+	CPDate < @CurrEndDate
+	and
+	TransType in ('100001','100004')
+group by
+	MerchantNo
+)
+	select
+		MerchantNo,
+		SUM(TransCnt) TransCnt,
+		SUM(TransAmt) TransAmt
+	into
+		#DeductionData
+	from
+		Deduction
+	group by
+		MerchantNo;
 
 --3.1.3 Prepare '代付类' Data
-With ORATransData as
+With ORA_TraData as
 (
 	select
 		MerchantNo,
@@ -155,6 +185,32 @@ With ORATransData as
 		CPDate >= @CurrStartDate
 		and
 		CPDate <  @CurrEndDate
+	group by
+		MerchantNo
+	union all
+	select
+		MerchantNo,
+		SUM(CalFeeCnt) TransCnt,
+		CONVERT(decimal,SUM(CalFeeAmt))/100 TransAmt
+	from
+		Table_TraScreenSum
+	where
+		CPDate >= @CurrStartDate
+		and
+		CPDate < @CurrEndDate
+		and
+		TransType in ('100002','100005')
+	group by
+		MerchantNo
+),
+AllOraData as
+(
+	select
+		MerchantNo,
+		SUM(TransCnt) TransCnt,
+		SUM(TransAmt) TransAmt
+	from
+		ORA_TraData
 	group by
 		MerchantNo
 ),
@@ -173,7 +229,7 @@ WUTransData as
 	group by
 		MerchantNo
 )
-select * into #ORAWUTransData from ORATransData
+select * into #ORAWUTransData from AllOraData
 union
 select * from WUTransData;
 
@@ -218,12 +274,46 @@ WUData as
 		CPDate <  @CurrEndDate
 	group by
 		MerchantNo
-)
-select * into #IncludeUPOPCUPData from PaymentData
+),
+AllData as
+(
+select * from PaymentData
 union
 select * from ORAData
 union
-select * from WUData;
+select * from WUData
+),
+FinalyData as
+(
+	select 
+		* 
+	from 
+		AllData
+	union all
+	select
+		MerchantNo,
+		SUM(CalFeeCnt) TransCnt,
+		convert(decimal,SUM(CalFeeAmt))/100 TransAmt
+	from
+		Table_TraScreenSum
+	where
+		CPDate >= @CurrStartDate
+		and
+		CPDate <  @CurrEndDate
+	group by
+		MerchantNo
+)
+	select
+		MerchantNo,
+		SUM(TransCnt) TransCnt,
+		SUM(TransAmt) TransAmt
+	into
+		#IncludeUPOPCUPData
+	from
+		FinalyData
+	group by
+		MerchantNo;
+
 
 --3.1.5 Join All Product Trans Data 
 select
@@ -261,29 +351,33 @@ from
 		
 --3.2 Prepare Configuration Data
 --3.2.1 Prepare BranchOffice
-With UnionUMSChannel as
+With SalesUnionUMSChannel as
 (
 	select
 		coalesce(UnionPay.UnionPaySpec, Sales.BranchOffice) BranchOffice,
 		Sales.MerchantName,
 		Sales.MerchantNo,
-		Sales.IndustryName
+		Mer.IndustryName
 	from
 		Table_SalesDeptConfiguration Sales
 		left join
 		Table_BranchOfficeNameRule UnionPay
 		on
 			Sales.BranchOffice = UnionPay.UnnormalBranchOfficeName
+		left join
+		Table_MerAttribute Mer
+		on
+			Sales.MerchantNo = Mer.MerchantNo
 	where
-		Sales.Channel in (N'银联', N'银商') 
+		Sales.Channel in (N'银联', N'银商')
 ),
-OtherChannel as
+SalesOtherChannel as
 (
 	select
 		coalesce(BranchOffice.UnionPaySpec,Sales.Area) as BranchOffice,
 		Sales.MerchantName,
 		Sales.MerchantNo,
-		Sales.IndustryName
+		Mer.IndustryName
 	from 
 		Table_SalesDeptConfiguration Sales 
 		left join 
@@ -296,13 +390,78 @@ OtherChannel as
 			BranchOfficeShortName is not null
 		)BranchOffice 
 		on 
-			Sales.Area = BranchOffice.BranchOfficeShortName 
+			Sales.Area = BranchOffice.BranchOfficeShortName
+		left join
+		Table_MerAttribute Mer
+		on
+			Sales.MerchantNo = Mer.MerchantNo
 	where 
 		Sales.Channel not in (N'银联',N'银商')
+),
+SalesDeptConfig as
+(
+	select * from SalesUnionUMSChannel
+	union all
+	select * from SalesOtherChannel
+),
+FinanceUnionUMSChannel as
+(
+	select
+		coalesce(UnionPay.UnionPaySpec, Finance.BranchOffice) BranchOffice,
+		NULL as MerchantName,
+		Finance.MerchantNo,
+		Finance.IndustryName
+	from
+		Table_FinancialDeptConfiguration Finance
+		left join
+		Table_BranchOfficeNameRule UnionPay
+		on
+			Finance.BranchOffice = UnionPay.UnnormalBranchOfficeName
+	where
+		Finance.Channel in (N'银联', N'银商') 
+),
+FinanceOtherChannel as
+(
+	select
+		coalesce(BranchOffice.UnionPaySpec,Finance.Area) as BranchOffice,
+		NULL as MerchantName,
+		Finance.MerchantNo,
+		Finance.IndustryName
+	from 
+		Table_FinancialDeptConfiguration Finance 
+		left join 
+		(select distinct 
+			BranchOfficeShortName,
+			UnionPaySpec 
+		from 
+			Table_BranchOfficeNameRule 
+		where 
+			BranchOfficeShortName is not null
+		)BranchOffice 
+		on 
+			Finance.Area = BranchOffice.BranchOfficeShortName 
+	where 
+		Finance.Channel not in (N'银联',N'银商')
+),
+FinanceDeptConfig as
+(
+	select * from FinanceUnionUMSChannel
+	union all
+	select * from FinanceOtherChannel
 )
-select * into #AllBranchOffice from UnionUMSChannel
-union 
-select * from OtherChannel;
+select
+	coalesce(Sales.BranchOffice,Finance.BranchOffice) BranchOffice,
+	coalesce(Sales.MerchantName,Finance.MerchantName) MerchantName,
+	coalesce(Sales.MerchantNo,Finance.MerchantNo) MerchantNo,
+	coalesce(Finance.IndustryName,Sales.IndustryName) IndustryName
+into
+	#AllBranchOffice
+from
+	SalesDeptConfig Sales
+	full outer join
+	FinanceDeptConfig Finance
+	on
+		Sales.MerchantNo = Finance.MerchantNo;
 
 --3.2.2 Join All Mer Trans
 select
@@ -332,8 +491,8 @@ from
 --3.2.3 Join All Config Data
 select
 	ISNULL(AllMerTrans.BranchOffice,N'') BranchOffice,
-	coalesce(AllMerTrans.MerchantNo,PayMer.MerchantNo,ORAMer.MerchantNo) MerchantNo,
-	coalesce(AllMerTrans.MerchantName,PayMer.MerchantName,ORAMer.MerchantName) MerchantName,
+	coalesce(AllMerTrans.MerchantNo,PayMer.MerchantNo,ORAMer.MerchantNo,Tra.MerchantNo) MerchantNo,
+	coalesce(AllMerTrans.MerchantName,PayMer.MerchantName,ORAMer.MerchantName,Tra.MerchantName) MerchantName,
 	N'88020000' as InstuNo,
 	case when ISNULL(Industry.UnionPayIndustryName,N'')=N'' and ISNULL(AllMerTrans.IndustryName,N'')=N'' then N'未配置'
 		 when ISNULL(Industry.UnionPayIndustryName,N'')=N'' and ISNULL(AllMerTrans.IndustryName,N'')<>N'' then N'其它'
@@ -361,12 +520,17 @@ from
 	(select * from Table_OraMerchants where OpenTime < @CurrEndDate) ORAMer
 	on
 		coalesce(AllMerTrans.MerchantNo,PayMer.MerchantNo) = ORAMer.MerchantNo
+	full outer join 
+	(select * from Table_TraMerchantInfo) Tra
+	on
+		coalesce(AllMerTrans.MerchantNo,PayMer.MerchantNo,ORAMer.MerchantNo) = Tra.MerchantNo
 	left join
 	Table_IndustryNameRule Industry
 	on
 		AllMerTrans.IndustryName = Industry.UnnormalIndustryName
 order by
-	BranchOffice DESC;	
+	BranchOffice DESC;
+
 
 --4. Drop Table
 Drop Table #ConsumeTransData;
